@@ -3,8 +3,8 @@
 use strict;
 use warnings;
 use Asterisk::AGI;
-use WWW::Mechanize;
-use WWW::Mechanize::TreeBuilder;
+use HTML::TreeBuilder::LibXML;
+use LWP::UserAgent;
 
 sub exit_with_error {
     my ($agi, $error) = @_;
@@ -18,55 +18,44 @@ sub exit_with_error {
 }
 
 my $AGI = Asterisk::AGI->new();
-
-my $mech = WWW::Mechanize->new();
-WWW::Mechanize::TreeBuilder->meta->apply($mech);
+my $ua = LWP::UserAgent->new();
 
 my $number = $AGI->get_variable('EXTEN');
 
-my $response = $mech->get('http://www.saynoto0870.com/search.php');
+my $response = $ua->post('http://www.saynoto0870.com/numbersearch.php', { number => $number } );
 
 unless ($response->is_success) {
     exit_with_error($AGI, "Unable to connect to say no to 0 8 7 0");
 }
 
-$response = $mech->submit_form( with_fields => { number => $number } );
+my $tree = HTML::TreeBuilder::LibXML->new();
+$tree->parse( $response->decoded_content );
 
-unless ($response->is_success) {
-    exit_with_error($AGI, "Unable to perform search on say no to 0 8 7 0");
+my $new_number;
+
+foreach ($tree->findnodes("//div[\@class='boardcontainer']/table[1]/tr/td[\@bgcolor='#FFFFCC'][5]")) {
+    $new_number = $_->as_trimmed_text;
+    $new_number =~ s/\D//g;
+    $new_number = "" unless $new_number =~ m/^(0800|0808|0500)/;
+
+    last if $new_number
 }
 
-my @tables = $mech->look_down( class => 'catbg', _tag => 'td', sub { $_[0]->as_text eq 'Main Database' } );
+unless ($new_number) {
+    foreach ($tree->findnodes("//div[\@class='boardcontainer']/table[1]/tr/td[\@bgcolor='#FFFFCC'][4]")) {
+        $new_number = $_->as_trimmed_text;
+        $new_number =~ s/\D//g;
+        $new_number = "" unless $new_number =~ m/^0[1-3]/;
 
-unless (scalar @tables) {
-    exit_with_error($AGI, "No results for that number or error parsing results");
+        last if $new_number
+    }
+
 }
 
-my $table =  $tables[0]->parent->parent;
-
-my @numbers = $table->look_down( bgcolor => '#FFFFCC' );
-
-unless (scalar @numbers > 5) {
-    exit_with_error($AGI, "No results for that number or error parsing results");
-}
-# 1 - 0870
-# 2 - 0844/045
-# 3 - 01/02/03
-# 4 - Freephone
-
-my $national = $numbers[3]->as_trimmed_text;
-my $freephone = $numbers[4]->as_trimmed_text;
-
-$national =~ s/\D//g;
-$freephone =~ s/\D//g;
-
-$freephone = "" unless $freephone =~ m/^(0800|0808|0500)/;
-$national = "" unless $national =~ m/^0[1-3]/;
-
-unless ($freephone || $national ) {
+unless ($new_number) {
     exit_with_error($AGI, "No free phone or national number found");
 }
 
-$AGI->noop("Dialing " . ($freephone || $national) . " in place of $number");
-$AGI->set_extension($freephone || $national);
+$AGI->noop("Dialing $new_number in place of $number");
+$AGI->set_extension($new_number);
 $AGI->set_priority(1);
